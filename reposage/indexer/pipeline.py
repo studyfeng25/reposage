@@ -159,7 +159,7 @@ class IndexPipeline:
         from reposage.generator.agent_index import AgentIndexGenerator
         gen = AgentIndexGenerator(self.repo_root, self.db)
         gen.generate()
-        console.print(f"  Agent index written to .reposage/")
+        console.print(f"  Agent index written to RepoSage-{self.repo_root.name}/")
 
     def _write_pending_llm(self):
         """Write pending LLM task counts and print instructions for Claude."""
