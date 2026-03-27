@@ -184,7 +184,7 @@ async def start_mcp_server(repo_root: Path):
 
     async with stdio_server() as (read_stream, write_stream):
         from mcp.server.models import InitializationOptions
-        import mcp.types as mcp_types
+        from mcp.server import NotificationOptions
         await server.run(
             read_stream,
             write_stream,
@@ -192,7 +192,7 @@ async def start_mcp_server(repo_root: Path):
                 server_name="reposage",
                 server_version="0.1.0",
                 capabilities=server.get_capabilities(
-                    notification_options=mcp_types.NotificationOptions(),
+                    notification_options=NotificationOptions(),
                     experimental_capabilities={},
                 ),
             ),

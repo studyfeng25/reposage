@@ -115,7 +115,7 @@ reposage analyze /path/to/your/repo --skip-wiki --skip-embed
 ### 接入 Claude Code
 
 ```bash
-claude mcp add reposage -- /path/to/.venv/bin/python -m reposage mcp --repo /path/to/your/repo
+claude mcp add --scope user reposage -- /path/to/.venv/bin/python -m reposage mcp --repo /path/to/your/repo
 ```
 
 重启 Claude Code，以下工具即可在对话中直接使用：
@@ -152,7 +152,7 @@ reposage status <仓库路径>                 # 显示索引统计（符号数�
 
 ## 🤖 MCP 工具详解
 
-通过 `claude mcp add reposage -- python -m reposage mcp --repo <路径>` 接入后，可使用以下工具：
+通过 `claude mcp add --scope user reposage -- python -m reposage mcp --repo <路径>` 接入后，可使用以下工具：
 
 ### `search` — 混合搜索
 
@@ -429,7 +429,7 @@ content = response.text
 ### Claude Code（完整支持）
 
 ```bash
-claude mcp add reposage -- /path/to/.venv/bin/python -m reposage mcp --repo /path/to/repo
+claude mcp add --scope user reposage -- /path/to/.venv/bin/python -m reposage mcp --repo /path/to/repo
 ```
 
 ### Cursor
@@ -452,8 +452,8 @@ claude mcp add reposage -- /path/to/.venv/bin/python -m reposage mcp --repo /pat
 每个仓库启动独立的 MCP server 实例，使用不同名称：
 
 ```bash
-claude mcp add reposage-search  -- python -m reposage mcp --repo /path/to/search-repo
-claude mcp add reposage-payment -- python -m reposage mcp --repo /path/to/payment-repo
+claude mcp add --scope user reposage-search  -- python -m reposage mcp --repo /path/to/search-repo
+claude mcp add --scope user reposage-payment -- python -m reposage mcp --repo /path/to/payment-repo
 ```
 
 ---
