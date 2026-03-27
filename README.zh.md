@@ -2,6 +2,35 @@
 
 [English](./README.md) | [简体中文](./README.zh.md)
 
+---
+
+## 致谢
+
+RepoSage 的诞生离不开两个优秀的开源项目：
+
+- **[GitNexus](https://github.com/abhigyanpatwari/GitNexus)**（作者 [@abhigyanpatwari](https://github.com/abhigyanpatwari)）— RepoSage 的知识图谱架构和 MCP 工具设计直接受到 GitNexus 的启发。它提出的"索引期预计算结构关系"的核心思想（符号图谱、社区检测、执行流追踪）让我看到了这条路的可能性。
+
+- **[DeepWiki](https://github.com/AsyncFuncAI/deepwiki-open)**（作者 [@AsyncFuncAI](https://github.com/AsyncFuncAI)）— 用 LLM 为代码库生成人类可读 Wiki 文档、结合 RAG 问答的思路来自 DeepWiki。它简洁的处理流程（克隆 → 向量化 → 生成）是很好的参考。
+
+感谢两个项目的开源精神。
+
+---
+
+## 为什么做这个项目
+
+我日常维护的是大型移动端代码库（Objective-C、Swift、Android Java）。这类仓库对 AI 编程助手来说出了名的难理解：数千个文件、深层继承体系、跨几十个文件的调用链——在这种复杂度下，AI Agent 经常遗漏依赖关系，导致破坏性改动。
+
+GitNexus 不支持 ObjC（仅 TypeScript），DeepWiki 只有语义搜索（没有结构图谱）——两者都没能完整解决移动端的问题。于是我把两者的优点合在一起，做了 RepoSage：
+
+- 知识图谱的**结构精确性**（谁调用了谁、谁继承了谁）
+- LLM 生成文档的**语义理解**
+- 对移动端核心语言的原生支持：**ObjC、Swift、Java**
+- **MCP 服务器**让 AI Agent 直接查询图谱，而不是盲目读文件
+
+目标很简单：让 AI Agent 真正理解复杂的移动端代码库，而不只是在里面搜索。
+
+---
+
 **面向 ObjC / Swift / Android Java 仓库的代码智能工具 — 双层文档 + MCP 服务**
 
 RepoSage 将你的移动端代码库索引为知识图谱，并通过以下方式暴露出来：

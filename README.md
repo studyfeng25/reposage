@@ -2,6 +2,35 @@
 
 [English](./README.md) | [简体中文](./README.zh.md)
 
+---
+
+## Acknowledgements
+
+RepoSage stands on the shoulders of two excellent open-source projects:
+
+- **[GitNexus](https://github.com/abhigyanpatwari/GitNexus)** by [@abhigyanpatwari](https://github.com/abhigyanpatwari) — the idea of building a knowledge graph from code and exposing it through MCP tools was directly inspired by GitNexus. Its architecture of precomputed relational intelligence (symbol graph, community detection, process tracing) showed what was possible.
+
+- **[DeepWiki](https://github.com/AsyncFuncAI/deepwiki-open)** by [@AsyncFuncAI](https://github.com/AsyncFuncAI) — the approach of using LLMs to generate human-readable wiki documentation from a codebase, combined with RAG-powered Q&A, came from DeepWiki. Its clean pipeline of clone → embed → generate was a great reference.
+
+Thank you to both projects for making your work open source.
+
+---
+
+## Why This Project Exists
+
+I work on large mobile codebases (Objective-C, Swift, Android Java) that are notoriously hard for AI coding assistants to understand. These repos have thousands of files, deep inheritance hierarchies, and call chains that span dozens of files — the kind of complexity where AI agents regularly miss dependencies and make breaking changes.
+
+Neither GitNexus (no ObjC support, TypeScript-only) nor DeepWiki (semantic search only, no structural graph) fully solved this for mobile. So I built RepoSage to combine both approaches:
+
+- The **structural precision** of a knowledge graph (who calls what, what extends what)
+- The **semantic understanding** of LLM-generated documentation
+- First-class support for the languages that matter in mobile: **ObjC, Swift, Java**
+- An **MCP server** so AI agents can query the graph directly instead of blindly reading files
+
+The goal is simple: let AI agents truly understand a complex mobile codebase, not just search through it.
+
+---
+
 **Code intelligence for ObjC / Swift / Android Java repos — dual-layer docs + MCP server.**
 
 RepoSage indexes your mobile codebase into a knowledge graph, then exposes it through:
