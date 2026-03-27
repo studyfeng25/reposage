@@ -1,5 +1,7 @@
 # RepoSage
 
+[English](./README.md) | [简体中文](./README.zh.md)
+
 ---
 
 ## 致谢
