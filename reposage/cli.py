@@ -109,6 +109,69 @@ def mcp(repo, repos_dir):
 
 @cli.command()
 @click.argument("repo_path", type=click.Path(exists=True))
+@click.option("--language", default=None, help="Only process symbols of this language (objc/swift/java)")
+@click.option("--skip-summaries", is_flag=True, help="Skip symbol summary generation")
+@click.option("--skip-wiki", is_flag=True, help="Skip wiki/architecture generation")
+@click.option("--force-wiki", is_flag=True, help="Regenerate wiki even if it already exists")
+@click.option("--model", default="claude-haiku-4-5-20251001", show_default=True,
+              help="Claude model to use")
+def generate(repo_path, language, skip_summaries, skip_wiki, force_wiki, model):
+    """Batch-generate symbol summaries and wiki docs using Claude API.
+
+    Requires ANTHROPIC_API_KEY environment variable. Stops immediately on any error.
+    """
+    from reposage.storage.db import RepoSageDB
+    from reposage.storage.vector_store import VectorStore
+    from reposage.indexer.pipeline import get_reposage_dir
+    from reposage.generator.batch import BatchGenerator
+
+    repo = Path(repo_path).resolve()
+    reposage_dir = get_reposage_dir(repo)
+    db_path = reposage_dir / "index.db"
+
+    if not db_path.exists():
+        console.print("[red]Not indexed yet.[/red] Run: reposage analyze <repo>")
+        raise SystemExit(1)
+
+    try:
+        db = RepoSageDB(db_path)
+        vector_store = VectorStore(reposage_dir)
+        gen = BatchGenerator(repo, db, vector_store, model=model)
+    except RuntimeError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1)
+
+    console.print(f"[bold green]Generating[/bold green] LLM content for {repo.name} "
+                  f"(model: {model})")
+
+    if not skip_summaries:
+        pending = gen._count_pending(language)
+        if pending == 0:
+            console.print("[dim]All symbols already have summaries — skipping.[/dim]")
+        else:
+            lang_label = f" [{language}]" if language else ""
+            console.print(f"\n[bold]Summaries{lang_label}[/bold] — {pending} pending")
+            try:
+                total = gen.generate_summaries(language=language, console=console)
+                console.print(f"[bold green]✓ Summaries done[/bold green] — wrote {total} total")
+            except Exception as e:
+                console.print(f"[red]✗ Summaries failed:[/red] {e}")
+                raise SystemExit(1)
+
+    if not skip_wiki:
+        console.print("\n[bold]Wiki[/bold]")
+        try:
+            total = gen.generate_wiki(force=force_wiki, console=console)
+            console.print(f"[bold green]✓ Wiki done[/bold green] — wrote {total} module(s)")
+        except Exception as e:
+            console.print(f"[red]✗ Wiki failed:[/red] {e}")
+            raise SystemExit(1)
+
+    console.print("\n[bold green]Done.[/bold green]")
+
+
+@cli.command()
+@click.argument("repo_path", type=click.Path(exists=True))
 @click.option("--port", default=8080, help="Port for the web server")
 def serve(repo_path, port):
     """Start the web UI server."""
