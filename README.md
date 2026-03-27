@@ -143,12 +143,12 @@ Tell Claude in conversation:
 
 > "Please call get_pending_summaries and get_pending_wiki to complete the LLM generation phase for my-repo"
 
-Claude will automatically:
-1. Pull batches of symbols without summaries → generate one-sentence descriptions → write back to the index
-2. Pull modules without wiki docs → generate Markdown → write to `RepoSage-my-repo/docs/`
+Claude will automatically loop until done — no further input needed:
+1. Fetch a batch of symbols → generate summaries → write back → fetch next batch → repeat until `remaining == 0`
+2. Fetch pending modules → generate Markdown wiki → write to `RepoSage-my-repo/docs/`
 3. Generate `ARCHITECTURE.md`
 
-This uses **whichever Claude model you're currently running** — no API key needed.
+Each tool response includes a `next_action` field that instructs Claude to continue immediately without asking for confirmation. This uses **whichever Claude model you're currently running** — no API key needed.
 
 **Option B — Via CLI (batch mode, requires `ANTHROPIC_API_KEY`)**
 
@@ -523,13 +523,12 @@ claude mcp add --scope user reposage -- \
 
 > "请调用 get_pending_summaries 和 get_pending_wiki 工具完成 my-repo 的 LLM 生成阶段"
 
-Claude 会自动：
-1. 批量拉取没有 summary 的符号 → 生成一句话描述 → 写回索引并更新向量嵌入
-2. 拉取没有 wiki 的模块 → 生成 Markdown 文档 → 写入 `RepoSage-my-repo/docs/`
+Claude 会自动循环直到全部完成，无需用户干预：
+1. 拉取一批待处理符号 → 生成摘要 → 写回索引 → 拉取下一批 → 循环直到 `remaining == 0`
+2. 拉取待处理模块 → 生成 Markdown wiki → 写入 `RepoSage-my-repo/docs/`
 3. 生成 `ARCHITECTURE.md`
 
-这一步使用**你当前对话中的 Claude 模型**，无需配置 API Key。
-
+每个工具的返回结果都包含 `next_action` 字段，指示 Claude 立即继续处理下一批，无需用户确认。这一步使用**你当前对话中的 Claude 模型**，无需配置 API Key。
 **方式 B — 通过 CLI 批量模式（需要 `ANTHROPIC_API_KEY`）**
 
 ```bash

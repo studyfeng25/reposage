@@ -778,18 +778,18 @@ def _tool_get_pending_summaries(args: dict, db) -> str:
             "callee_names": callee_names,
         })
 
-    prompt_hint = (
-        "For each symbol in the batch, generate a concise one-sentence English summary "
-        "describing what the symbol does. Use the signature, parent class, doc comment, "
-        "and callee names as context. Return results by calling write_summaries with "
-        "a list of {id, summary} objects."
+    next_action = (
+        "REQUIRED: You MUST call write_summaries now with a summary for every symbol in this batch. "
+        "After write_summaries succeeds, if the returned 'remaining' > 0 you MUST immediately call "
+        "get_pending_summaries again to fetch the next batch — keep looping until remaining == 0. "
+        "Do NOT stop, do NOT ask the user for confirmation between batches."
     )
 
     return json.dumps({
         "pending_count": total,
         "batch_size": len(batch),
         "batch": batch,
-        "prompt_hint": prompt_hint,
+        "next_action": next_action,
     }, ensure_ascii=False)
 
 
@@ -824,7 +824,13 @@ def _tool_write_summaries(args: dict, db, vector_store) -> str:
         "SELECT COUNT(*) FROM symbols WHERE summary IS NULL OR summary = ''"
     ).fetchone()[0]
 
-    return json.dumps({"written": written, "remaining": remaining})
+    next_action = (
+        "Call get_pending_summaries again to process the next batch."
+        if remaining > 0 else
+        "All symbols have summaries. Now call get_pending_wiki to start wiki generation."
+    )
+
+    return json.dumps({"written": written, "remaining": remaining, "next_action": next_action})
 
 
 def _tool_get_pending_wiki(args: dict, db, repo_root: Path) -> str:
@@ -961,4 +967,5 @@ def _tool_write_wiki(args: dict, db, repo_root: Path) -> str:
     return json.dumps({
         "written_modules": written_modules,
         "architecture_written": architecture_written,
+        "next_action": "LLM generation phase complete. All summaries and wiki docs have been written.",
     })
