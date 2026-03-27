@@ -1,8 +1,14 @@
 """Full indexing pipeline: parse → store → resolve → embed → generate."""
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+
+def get_reposage_dir(repo_root: Path) -> Path:
+    """Return the RepoSage data directory for a repo (sibling dir, not inside repo)."""
+    return repo_root.parent / f"RepoSage-{repo_root.name}"
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -14,7 +20,7 @@ console = Console()
 class IndexPipeline:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
-        self.reposage_dir = repo_root / ".reposage"
+        self.reposage_dir = get_reposage_dir(repo_root)
         self.reposage_dir.mkdir(exist_ok=True)
 
         from reposage.storage.db import RepoSageDB
@@ -48,16 +54,14 @@ class IndexPipeline:
         # Phase 5: Generate agent index
         self._phase_agent_index()
 
-        # Phase 6: Generate wiki (calls Claude API)
-        if not skip_wiki:
-            self._phase_wiki()
-
         self.db.set_meta("last_indexed", datetime.now().isoformat())
         stats = self.db.get_stats()
         console.print(f"\n[bold green]Done![/bold green]  "
                       f"Symbols: {stats['symbols']}  "
                       f"Relations: {stats['relations']}  "
                       f"Modules: {stats['modules']}")
+
+        self._write_pending_llm()
 
     def index_file(self, file_path: Path):
         """Incrementally index a single file (called by watcher)."""
@@ -157,12 +161,39 @@ class IndexPipeline:
         gen.generate()
         console.print(f"  Agent index written to .reposage/")
 
-    def _phase_wiki(self):
-        import os
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            console.print("  [yellow]Skipping wiki: ANTHROPIC_API_KEY not set[/yellow]")
-            return
-        from reposage.generator.wiki import WikiGenerator
-        gen = WikiGenerator(self.repo_root, self.db)
-        gen.generate()
-        console.print(f"  Wiki written to docs/")
+    def _write_pending_llm(self):
+        """Write pending LLM task counts and print instructions for Claude."""
+        symbol_count = self.db.conn.execute(
+            "SELECT COUNT(*) FROM symbols WHERE summary IS NULL OR summary = ''"
+        ).fetchone()[0]
+
+        modules = self.db.get_all_modules()
+        docs_dir = self.reposage_dir / "docs" / "modules"
+        module_count = sum(
+            1 for m in modules
+            if not (docs_dir / f"{m['name']}.md").exists()
+        )
+        arch_missing = not (self.reposage_dir / "docs" / "ARCHITECTURE.md").exists()
+
+        pending = {
+            "symbol_count": symbol_count,
+            "module_count": module_count,
+            "architecture_missing": arch_missing,
+            "generated_at": datetime.now().isoformat(),
+        }
+        pending_path = self.reposage_dir / "pending_llm.json"
+        with open(pending_path, "w") as f:
+            json.dump(pending, f, indent=2)
+
+        if symbol_count > 0 or module_count > 0 or arch_missing:
+            console.print("\n[bold yellow]LLM tasks pending[/bold yellow]")
+            if symbol_count > 0:
+                console.print(f"  Symbols without summary : {symbol_count}")
+            if module_count > 0:
+                console.print(f"  Modules without wiki    : {module_count}")
+            if arch_missing:
+                console.print(f"  ARCHITECTURE.md missing : yes")
+            console.print(
+                "\n  Ask Claude to complete these tasks:\n"
+                '  [italic]"请调用 get_pending_summaries 和 get_pending_wiki 工具完成 RepoSage 的 LLM 生成阶段"[/italic]'
+            )

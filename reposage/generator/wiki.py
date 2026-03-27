@@ -47,22 +47,24 @@ Be concise and actionable. Focus on helping a new engineer understand the codeba
 
 class WikiGenerator:
     def __init__(self, repo_root: Path, db=None):
+        from reposage.indexer.pipeline import get_reposage_dir
         self.repo_root = repo_root
-        self.docs_dir = repo_root / "docs"
-        self.docs_dir.mkdir(exist_ok=True)
+        reposage_dir = get_reposage_dir(repo_root)
+        self.docs_dir = reposage_dir / "docs"
+        self.docs_dir.mkdir(parents=True, exist_ok=True)
         (self.docs_dir / "modules").mkdir(exist_ok=True)
 
         if db is None:
             from reposage.storage.db import RepoSageDB
-            db_path = repo_root / ".reposage" / "index.db"
+            db_path = reposage_dir / "index.db"
             db = RepoSageDB(db_path)
         self.db = db
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY not set")
-        import anthropic
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.client = None
+        if api_key:
+            import anthropic
+            self.client = anthropic.Anthropic(api_key=api_key)
 
     def generate(self, force: bool = False):
         modules = self.db.get_all_modules()
@@ -132,6 +134,9 @@ class WikiGenerator:
             relations=relations_text or "(none detected)",
         )
 
+        if not self.client:
+            return self._fallback_module_doc(module, rows)
+
         try:
             message = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
@@ -139,7 +144,6 @@ class WikiGenerator:
                 messages=[{"role": "user", "content": prompt}],
             )
             content = message.content[0].text
-            # Store summary back to DB
             self.db.upsert_module(
                 module["id"], module["name"], module["files"],
                 description=content[:200],
@@ -148,7 +152,6 @@ class WikiGenerator:
             return f"# {module['name']}\n\n{content}"
         except Exception as e:
             logger.warning(f"Wiki generation failed for {module['name']}: {e}")
-            # Fallback: auto-generated without LLM
             return self._fallback_module_doc(module, rows)
 
     def _fallback_module_doc(self, module: Dict, rows) -> str:
@@ -168,6 +171,12 @@ class WikiGenerator:
             repo_name=self.repo_root.name,
             modules=modules_text or "(no modules)",
         )
+        if not self.client:
+            lines = [f"# {self.repo_root.name} Architecture\n", "## Modules\n"]
+            for m in module_summaries:
+                lines.append(f"- **{m['name']}**")
+            return "\n".join(lines)
+
         try:
             message = self.client.messages.create(
                 model="claude-haiku-4-5-20251001",
@@ -177,8 +186,7 @@ class WikiGenerator:
             return message.content[0].text
         except Exception as e:
             logger.warning(f"Architecture doc generation failed: {e}")
-            lines = [f"# {self.repo_root.name} Architecture\n"]
-            lines.append("## Modules\n")
+            lines = [f"# {self.repo_root.name} Architecture\n", "## Modules\n"]
             for m in module_summaries:
                 lines.append(f"- **{m['name']}**")
             return "\n".join(lines)

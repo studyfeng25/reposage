@@ -14,9 +14,10 @@ logger = logging.getLogger(__name__)
 
 class AgentIndexGenerator:
     def __init__(self, repo_root: Path, db: RepoSageDB):
+        from reposage.indexer.pipeline import get_reposage_dir
         self.repo_root = repo_root
         self.db = db
-        self.out_dir = repo_root / ".reposage"
+        self.out_dir = get_reposage_dir(repo_root)
         self.out_dir.mkdir(exist_ok=True)
 
     def generate(self):

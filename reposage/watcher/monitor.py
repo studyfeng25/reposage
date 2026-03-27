@@ -82,12 +82,12 @@ class _Handler(FileSystemEventHandler):
 
 def start_watcher(repo_root: Path):
     """Start watching a repository for file changes. Blocks until Ctrl-C."""
-    from reposage.indexer.pipeline import IndexPipeline
+    from reposage.indexer.pipeline import IndexPipeline, get_reposage_dir
     from rich.console import Console
 
     console = Console()
 
-    db_path = repo_root / ".reposage" / "index.db"
+    db_path = get_reposage_dir(repo_root) / "index.db"
     if not db_path.exists():
         console.print("[yellow]Repository not indexed yet. Running initial analysis...[/yellow]")
         pipeline = IndexPipeline(repo_root)

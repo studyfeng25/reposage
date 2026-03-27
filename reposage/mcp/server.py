@@ -8,31 +8,62 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-async def start_mcp_server(repo_root: Path):
-    """Entry point: start the MCP stdio server for a repo."""
+async def start_mcp_server(repos: dict):
+    """Entry point: start the MCP stdio server for one or more repos.
+
+    Args:
+        repos: dict mapping repo_name -> repo_root Path
+    """
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
     from mcp import types
 
-    db_path = repo_root / ".reposage" / "index.db"
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"Repository not indexed yet. Run: reposage analyze {repo_root}"
-        )
-
     from reposage.storage.db import RepoSageDB
     from reposage.storage.vector_store import VectorStore
+    from reposage.indexer.pipeline import get_reposage_dir
 
-    db = RepoSageDB(db_path)
-    vector_store = VectorStore(repo_root / ".reposage" / "vectors", repo_root.name)
+    # Build registry: name -> {db, vector_store, root}
+    repos_registry: dict = {}
+    for name, repo_root in repos.items():
+        reposage_dir = get_reposage_dir(repo_root)
+        db_path = reposage_dir / "index.db"
+        if not db_path.exists():
+            logger.warning(f"Repo '{name}' not indexed, skipping. Run: reposage analyze {repo_root}")
+            continue
+        repos_registry[name] = {
+            "db": RepoSageDB(db_path),
+            "vector_store": VectorStore(reposage_dir / "vectors", name),
+            "root": repo_root,
+        }
+
+    if not repos_registry:
+        raise FileNotFoundError("No indexed repositories found. Run: reposage analyze <repo_path>")
+
+    # Backwards-compat: keep single-repo shortcuts
+    _single = list(repos_registry.values())[0] if len(repos_registry) == 1 else None
 
     server = Server("reposage")
 
     # ── Tool Handlers ─────────────────────────────────────────────────────────
 
+    repo_param = {
+        "repo": {
+            "type": "string",
+            "description": (
+                f"Repository name to query. Available: {', '.join(repos_registry.keys())}. "
+                "Omit if only one repo is loaded."
+            ),
+        }
+    }
+
     @server.list_tools()
     async def list_tools():
         return [
+            types.Tool(
+                name="list_repos",
+                description="List all loaded repositories with their index stats.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
             types.Tool(
                 name="search",
                 description=(
@@ -48,6 +79,7 @@ async def start_mcp_server(repo_root: Path):
                             "type": "string",
                             "description": "Filter by language: objc, swift, java",
                         },
+                        **repo_param,
                     },
                     "required": ["query"],
                 },
@@ -64,6 +96,7 @@ async def start_mcp_server(repo_root: Path):
                         "name": {"type": "string", "description": "Symbol name"},
                         "id": {"type": "string", "description": "Symbol ID (exact, from search results)"},
                         "file": {"type": "string", "description": "File path to disambiguate"},
+                        **repo_param,
                     },
                 },
             ),
@@ -75,6 +108,7 @@ async def start_mcp_server(repo_root: Path):
                     "properties": {
                         "name": {"type": "string", "description": "Method/function name"},
                         "depth": {"type": "integer", "default": 2, "description": "BFS depth"},
+                        **repo_param,
                     },
                     "required": ["name"],
                 },
@@ -95,6 +129,7 @@ async def start_mcp_server(repo_root: Path):
                             "default": "upstream",
                         },
                         "depth": {"type": "integer", "default": 3},
+                        **repo_param,
                     },
                     "required": ["target"],
                 },
@@ -106,6 +141,7 @@ async def start_mcp_server(repo_root: Path):
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Module name (directory name)"},
+                        **repo_param,
                     },
                     "required": ["name"],
                 },
@@ -121,6 +157,7 @@ async def start_mcp_server(repo_root: Path):
                     "properties": {
                         "entry_point": {"type": "string", "description": "Starting method/function name"},
                         "depth": {"type": "integer", "default": 5},
+                        **repo_param,
                     },
                     "required": ["entry_point"],
                 },
@@ -129,14 +166,105 @@ async def start_mcp_server(repo_root: Path):
                 name="ask",
                 description=(
                     "RAG-powered Q&A about the codebase. "
-                    "Searches docs + symbols and answers in natural language."
+                    "Retrieves relevant symbols and docs as context — YOU (the LLM) answer the question."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "question": {"type": "string"},
+                        **repo_param,
                     },
                     "required": ["question"],
+                },
+            ),
+            types.Tool(
+                name="get_pending_summaries",
+                description=(
+                    "Return a batch of symbols that have no summary yet, with enough context "
+                    "(signature, parent class, callees, doc comment) for YOU to generate a one-sentence summary. "
+                    "After generating summaries, call write_summaries to persist them."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "batch_size": {
+                            "type": "integer",
+                            "default": 50,
+                            "description": "Number of symbols to return per batch (max 200)",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Filter by language: objc, swift, java",
+                        },
+                        **repo_param,
+                    },
+                },
+            ),
+            types.Tool(
+                name="write_summaries",
+                description=(
+                    "Persist summaries you generated into the DB and update vector embeddings. "
+                    "Call this after get_pending_summaries + generating summaries."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "summaries": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "summary": {"type": "string"},
+                                },
+                                "required": ["id", "summary"],
+                            },
+                            "description": "List of {id, summary} pairs",
+                        },
+                        **repo_param,
+                    },
+                    "required": ["summaries"],
+                },
+            ),
+            types.Tool(
+                name="get_pending_wiki",
+                description=(
+                    "Return modules that have no wiki doc yet, with full context (symbols + relations) "
+                    "for YOU to generate Markdown documentation. "
+                    "After generating, call write_wiki to persist."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {**repo_param},
+                },
+            ),
+            types.Tool(
+                name="write_wiki",
+                description=(
+                    "Persist wiki Markdown docs you generated into docs/ directory and update module DB entries."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "modules": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "content": {"type": "string"},
+                                },
+                                "required": ["id", "name", "content"],
+                            },
+                            "description": "List of {id, name, content} module wiki docs",
+                        },
+                        "architecture": {
+                            "type": "string",
+                            "description": "Content for ARCHITECTURE.md (optional)",
+                        },
+                        **repo_param,
+                    },
                 },
             ),
         ]
@@ -144,7 +272,7 @@ async def start_mcp_server(repo_root: Path):
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         try:
-            result = await _dispatch(name, arguments, db, vector_store, repo_root)
+            result = await _dispatch(name, arguments, repos_registry)
             return [types.TextContent(type="text", text=result)]
         except Exception as e:
             logger.exception(f"Tool {name} failed")
@@ -154,31 +282,42 @@ async def start_mcp_server(repo_root: Path):
 
     @server.list_resources()
     async def list_resources():
-        return [
-            types.Resource(
-                uri="reposage://repo/context",
-                name="Repository Context",
-                description="Stats, index status, module list",
+        resources = []
+        for rname in repos_registry:
+            resources.append(types.Resource(
+                uri=f"reposage://{rname}/context",
+                name=f"{rname} — Repository Context",
+                description=f"Stats, index status, module list for {rname}",
                 mimeType="application/json",
-            ),
-            types.Resource(
-                uri="reposage://modules",
-                name="All Modules",
-                description="Module topology with exported symbols",
+            ))
+            resources.append(types.Resource(
+                uri=f"reposage://{rname}/modules",
+                name=f"{rname} — All Modules",
+                description=f"Module topology with exported symbols for {rname}",
                 mimeType="application/json",
-            ),
-        ]
+            ))
+        return resources
 
     @server.read_resource()
     async def read_resource(uri: str) -> str:
-        if uri == "reposage://repo/context":
+        # uri format: reposage://{repo_name}/context or reposage://{repo_name}/modules
+        parts = uri.replace("reposage://", "").split("/", 1)
+        if len(parts) != 2:
+            return json.dumps({"error": f"Unknown resource: {uri}"})
+        rname, resource_type = parts
+        entry = repos_registry.get(rname)
+        if not entry:
+            return json.dumps({"error": f"Repo '{rname}' not found"})
+        db = entry["db"]
+        root = entry["root"]
+        if resource_type == "context":
             stats = db.get_stats()
             modules = [m["name"] for m in db.get_all_modules()]
-            return json.dumps({"repo": repo_root.name, "stats": stats, "modules": modules}, indent=2)
-        elif uri == "reposage://modules":
+            return json.dumps({"repo": rname, "stats": stats, "modules": modules}, indent=2)
+        elif resource_type == "modules":
             modules = db.get_all_modules()
             return json.dumps(modules, indent=2, ensure_ascii=False)
-        return json.dumps({"error": "Unknown resource"})
+        return json.dumps({"error": f"Unknown resource type: {resource_type}"})
 
     # ── Start ─────────────────────────────────────────────────────────────────
 
@@ -201,7 +340,36 @@ async def start_mcp_server(repo_root: Path):
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
-async def _dispatch(name: str, args: dict, db, vector_store, repo_root: Path) -> str:
+def _resolve_repo(args: dict, repos_registry: dict):
+    """Return (db, vector_store, root) for the requested repo, or an error string."""
+    repo_name = args.get("repo")
+    if repo_name:
+        entry = repos_registry.get(repo_name)
+        if not entry:
+            available = ", ".join(repos_registry.keys())
+            return None, f"Repo '{repo_name}' not found. Available: {available}"
+        return entry, None
+    # No repo specified
+    if len(repos_registry) == 1:
+        return list(repos_registry.values())[0], None
+    available = ", ".join(repos_registry.keys())
+    return None, (
+        f"Multiple repos loaded: {available}. "
+        f"Please specify repo=<name> in your tool call."
+    )
+
+
+async def _dispatch(name: str, args: dict, repos_registry: dict) -> str:
+    if name == "list_repos":
+        return _tool_list_repos(repos_registry)
+
+    entry, err = _resolve_repo(args, repos_registry)
+    if err:
+        return err
+    db = entry["db"]
+    vector_store = entry["vector_store"]
+    repo_root = entry["root"]
+
     if name == "search":
         return _tool_search(args, db, vector_store)
     elif name == "symbol_context":
@@ -215,8 +383,30 @@ async def _dispatch(name: str, args: dict, db, vector_store, repo_root: Path) ->
     elif name == "execution_flow":
         return _tool_execution_flow(args, db)
     elif name == "ask":
-        return await _tool_ask(args, db, vector_store, repo_root)
+        return _tool_ask(args, db, vector_store, repo_root)
+    elif name == "get_pending_summaries":
+        return _tool_get_pending_summaries(args, db)
+    elif name == "write_summaries":
+        return _tool_write_summaries(args, db, vector_store)
+    elif name == "get_pending_wiki":
+        return _tool_get_pending_wiki(args, db, repo_root)
+    elif name == "write_wiki":
+        return _tool_write_wiki(args, db, repo_root)
     return f"Unknown tool: {name}"
+
+
+def _tool_list_repos(repos_registry: dict) -> str:
+    lines = [f"## Loaded Repositories ({len(repos_registry)})\n"]
+    for name, entry in repos_registry.items():
+        stats = entry["db"].get_stats()
+        lines.append(
+            f"### {name}\n"
+            f"  Path: {entry['root']}\n"
+            f"  Symbols: {stats['symbols']}  Relations: {stats['relations']}  "
+            f"Modules: {stats['modules']}  Files: {stats['files']}\n"
+            f"  Last indexed: {stats.get('last_indexed', 'unknown')}"
+        )
+    return "\n".join(lines)
 
 
 def _tool_search(args: dict, db, vector_store) -> str:
@@ -485,10 +675,10 @@ def _tool_execution_flow(args: dict, db) -> str:
     return "\n".join(lines)
 
 
-async def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
+def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
+    """Return retrieved context for the question. The calling LLM answers it."""
     question = args["question"]
 
-    # Search for relevant symbols
     fts = db.search_symbols_fts(question, limit=10)
     sem = vector_store.search(question, limit=10)
 
@@ -496,55 +686,279 @@ async def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
     seen = set()
 
     for s in fts + sem:
-        sid = s.get("id") or s.get("id")
+        sid = s.get("id")
         if sid and sid not in seen:
             seen.add(sid)
-            sig = s.get("signature") or ""
-            doc = s.get("doc_comment") or ""
-            summary = s.get("summary") or ""
+            # Fetch full symbol so we have summary too
+            full = db.get_symbol(sid) or s
+            sig = full.get("signature") or ""
+            doc = full.get("doc_comment") or ""
+            summary = full.get("summary") or ""
             context_parts.append(
-                f"[{s.get('type','?')}] {s.get('name','?')} in {s.get('file','?')}:{s.get('start_line','?')}"
+                f"[{full.get('type','?')}] {full.get('name','?')} "
+                f"in {full.get('file','?')}:{full.get('start_line','?')}"
                 + (f"\n  Signature: {sig}" if sig else "")
+                + (f"\n  Summary: {summary[:200]}" if summary else "")
                 + (f"\n  Doc: {doc[:150]}" if doc else "")
-                + (f"\n  Summary: {summary[:150]}" if summary else "")
             )
 
-    # Also include wiki docs if available
+    from reposage.indexer.pipeline import get_reposage_dir
+    arch_md = get_reposage_dir(repo_root) / "docs" / "ARCHITECTURE.md"
     wiki_context = ""
-    arch_md = repo_root / "docs" / "ARCHITECTURE.md"
     if arch_md.exists():
         wiki_context = arch_md.read_text(encoding="utf-8")[:2000]
 
     context = "\n\n".join(context_parts[:15])
     if wiki_context:
-        context = f"Architecture Overview:\n{wiki_context}\n\nRelevant Symbols:\n{context}"
+        context = f"## Architecture Overview\n{wiki_context}\n\n## Relevant Symbols\n{context}"
 
-    import os
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return (
-            f"**Question**: {question}\n\n"
-            f"**Context** (set ANTHROPIC_API_KEY for AI answers):\n{context}"
+    return (
+        f"## Question\n{question}\n\n"
+        f"## Retrieved Context\n{context}\n\n"
+        f"---\nAnswer the question above using the retrieved context."
+    )
+
+
+def _tool_get_pending_summaries(args: dict, db) -> str:
+    batch_size = min(int(args.get("batch_size", 50)), 200)
+    language = args.get("language")
+
+    # Count total pending
+    if language:
+        total = db.conn.execute(
+            "SELECT COUNT(*) FROM symbols WHERE (summary IS NULL OR summary = '') AND language = ?",
+            (language,),
+        ).fetchone()[0]
+        rows = db.conn.execute(
+            """SELECT id, name, type, signature, parent_name, doc_comment, file, start_line, language
+               FROM symbols
+               WHERE (summary IS NULL OR summary = '') AND language = ?
+               ORDER BY type, file, start_line
+               LIMIT ?""",
+            (language, batch_size),
+        ).fetchall()
+    else:
+        total = db.conn.execute(
+            "SELECT COUNT(*) FROM symbols WHERE summary IS NULL OR summary = ''"
+        ).fetchone()[0]
+        rows = db.conn.execute(
+            """SELECT id, name, type, signature, parent_name, doc_comment, file, start_line, language
+               FROM symbols
+               WHERE summary IS NULL OR summary = ''
+               ORDER BY type, file, start_line
+               LIMIT ?""",
+            (batch_size,),
+        ).fetchall()
+
+    if not rows:
+        return json.dumps({"pending_count": 0, "batch": [], "message": "All symbols have summaries."})
+
+    batch = []
+    for r in rows:
+        # Get up to 5 callee names for extra context
+        callee_rows = db.conn.execute(
+            """SELECT DISTINCT r.target_name
+               FROM relations r
+               WHERE r.source_id = ? AND r.rel_type = 'CALLS'
+               LIMIT 5""",
+            (r["id"],),
+        ).fetchall()
+        callee_names = [c["target_name"] for c in callee_rows]
+
+        batch.append({
+            "id": r["id"],
+            "name": r["name"],
+            "type": r["type"],
+            "language": r["language"],
+            "signature": r["signature"] or "",
+            "parent_name": r["parent_name"] or "",
+            "doc_comment": (r["doc_comment"] or "")[:200],
+            "file": r["file"],
+            "line": r["start_line"],
+            "callee_names": callee_names,
+        })
+
+    prompt_hint = (
+        "For each symbol in the batch, generate a concise one-sentence English summary "
+        "describing what the symbol does. Use the signature, parent class, doc comment, "
+        "and callee names as context. Return results by calling write_summaries with "
+        "a list of {id, summary} objects."
+    )
+
+    return json.dumps({
+        "pending_count": total,
+        "batch_size": len(batch),
+        "batch": batch,
+        "prompt_hint": prompt_hint,
+    }, ensure_ascii=False)
+
+
+def _tool_write_summaries(args: dict, db, vector_store) -> str:
+    summaries = args.get("summaries", [])
+    if not summaries:
+        return json.dumps({"written": 0, "error": "No summaries provided"})
+
+    written = 0
+    for item in summaries:
+        sid = item.get("id")
+        summary = (item.get("summary") or "").strip()
+        if sid and summary:
+            db.conn.execute(
+                "UPDATE symbols SET summary = ? WHERE id = ?", (summary, sid)
+            )
+            written += 1
+    db.conn.commit()
+
+    # Re-embed updated symbols so semantic search benefits immediately
+    if written > 0:
+        ids = [item["id"] for item in summaries if item.get("id") and item.get("summary")]
+        updated_syms = []
+        for sid in ids:
+            sym = db.get_symbol(sid)
+            if sym:
+                updated_syms.append(sym)
+        if updated_syms:
+            vector_store.upsert_symbols(updated_syms)
+
+    remaining = db.conn.execute(
+        "SELECT COUNT(*) FROM symbols WHERE summary IS NULL OR summary = ''"
+    ).fetchone()[0]
+
+    return json.dumps({"written": written, "remaining": remaining})
+
+
+def _tool_get_pending_wiki(args: dict, db, repo_root: Path) -> str:
+    from reposage.indexer.pipeline import get_reposage_dir
+    modules = db.get_all_modules()
+    docs_dir = get_reposage_dir(repo_root) / "docs" / "modules"
+
+    pending = []
+    for m in modules:
+        md_path = docs_dir / f"{m['name']}.md"
+        if md_path.exists():
+            continue
+
+        # Symbols for this module
+        rows = db.conn.execute(
+            """SELECT name, type, signature, doc_comment, start_line, file
+               FROM symbols WHERE module_id = ? AND is_public = 1
+               ORDER BY type, name LIMIT 40""",
+            (m["id"],),
+        ).fetchall()
+        symbols_text = "\n".join(
+            f"- [{r['type']}] {r['name']}"
+            + (f": {r['signature']}" if r.get("signature") else "")
+            + (f" — {r['doc_comment'][:80]}" if r.get("doc_comment") else "")
+            for r in rows
         )
 
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=1024,
-            system=(
-                "You are a code expert. Answer questions about the codebase concisely. "
-                "Reference specific file paths and line numbers when relevant. "
-                "Use the provided context to give accurate answers."
-            ),
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Codebase context:\n{context}\n\nQuestion: {question}",
-                }
-            ],
+        # Key relations
+        rel_rows = db.conn.execute(
+            """SELECT DISTINCT r.rel_type, s.name as src, r.target_name as tgt
+               FROM relations r
+               JOIN symbols s ON r.source_id = s.id
+               WHERE s.module_id = ? AND r.rel_type IN ('EXTENDS','IMPLEMENTS','CONFORMS_TO','CALLS')
+               LIMIT 20""",
+            (m["id"],),
+        ).fetchall()
+        relations_text = "\n".join(
+            f"- {r['src']} {r['rel_type']} {r['tgt']}" for r in rel_rows
         )
-        return message.content[0].text
-    except Exception as e:
-        return f"AI answer failed ({e}). Context:\n{context}"
+
+        pending.append({
+            "id": m["id"],
+            "name": m["name"],
+            "files": m["files"][:10],
+            "symbols_text": symbols_text or "(no public symbols)",
+            "relations_text": relations_text or "(none detected)",
+        })
+
+    arch_md = get_reposage_dir(repo_root) / "docs" / "ARCHITECTURE.md"
+    need_architecture = not arch_md.exists()
+
+    module_prompt_template = (
+        "You are a senior mobile engineer writing documentation.\n"
+        "Given the following module information, write a concise Markdown document.\n\n"
+        "Module: {module_name}\n"
+        "Files: {files}\n\n"
+        "Key symbols:\n{symbols}\n\n"
+        "Key relationships:\n{relations}\n\n"
+        "Write a Markdown document with:\n"
+        "1. A one-paragraph description of this module's responsibility\n"
+        "2. Key classes/protocols/functions with a one-line description each\n"
+        "3. A 'How it works' section (2-4 sentences)\n"
+        "4. A Mermaid diagram of main class relationships (if applicable)\n\n"
+        "Be concise. No boilerplate."
+    )
+
+    arch_prompt_template = (
+        "You are a senior mobile engineer writing architecture documentation.\n"
+        "Given the following module summaries for '{repo_name}', write a top-level ARCHITECTURE.md.\n\n"
+        "Modules:\n{modules}\n\n"
+        "Write:\n"
+        "1. A 2-paragraph overview of what this codebase does\n"
+        "2. A module dependency diagram in Mermaid (flowchart TD)\n"
+        "3. A table of modules with their responsibilities\n"
+        "4. Key architectural patterns used\n\n"
+        "Be concise and actionable."
+    )
+
+    if not pending and not need_architecture:
+        return json.dumps({"message": "All modules have wiki docs and ARCHITECTURE.md exists."})
+
+    return json.dumps({
+        "pending_modules": len(pending),
+        "modules": pending,
+        "need_architecture": need_architecture,
+        "repo_name": repo_root.name,
+        "module_prompt_template": module_prompt_template,
+        "arch_prompt_template": arch_prompt_template if need_architecture else None,
+        "instructions": (
+            "For each module, fill in the module_prompt_template and generate Markdown content. "
+            "If need_architecture is true, collect all module summaries and fill arch_prompt_template. "
+            "Then call write_wiki with the results."
+        ),
+    }, ensure_ascii=False)
+
+
+def _tool_write_wiki(args: dict, db, repo_root: Path) -> str:
+    from reposage.indexer.pipeline import get_reposage_dir
+    modules = args.get("modules") or []
+    architecture = args.get("architecture") or ""
+
+    docs_dir = get_reposage_dir(repo_root) / "docs"
+    modules_dir = docs_dir / "modules"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    modules_dir.mkdir(exist_ok=True)
+
+    written_modules = 0
+    for m in modules:
+        mid = m.get("id")
+        name = m.get("name", "")
+        content = (m.get("content") or "").strip()
+        if not name or not content:
+            continue
+
+        md_path = modules_dir / f"{name}.md"
+        md_path.write_text(f"# {name}\n\n{content}", encoding="utf-8")
+
+        # Update module summary in DB
+        if mid:
+            db.conn.execute(
+                "UPDATE modules SET description = ?, summary = ? WHERE id = ?",
+                (content[:200], content[:200], mid),
+            )
+        written_modules += 1
+
+    db.conn.commit()
+
+    architecture_written = False
+    if architecture.strip():
+        arch_path = docs_dir / "ARCHITECTURE.md"
+        arch_path.write_text(architecture.strip(), encoding="utf-8")
+        architecture_written = True
+
+    return json.dumps({
+        "written_modules": written_modules,
+        "architecture_written": architecture_written,
+    })
