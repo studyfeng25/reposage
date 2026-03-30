@@ -85,6 +85,28 @@ CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
 CREATE INDEX IF NOT EXISTS idx_relations_target_name ON relations(target_name);
 CREATE INDEX IF NOT EXISTS idx_relations_type ON relations(rel_type);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool TEXT NOT NULL,
+    query TEXT DEFAULT '',
+    result_count INTEGER DEFAULT 0,
+    ts TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evolution_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    was_helpful INTEGER NOT NULL,
+    reason TEXT DEFAULT '',
+    tip TEXT DEFAULT '',
+    ts TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_ts ON tool_calls(ts);
+CREATE INDEX IF NOT EXISTS idx_evolution_log_helpful ON evolution_log(was_helpful);
 """
 
 
@@ -369,3 +391,63 @@ class RepoSageDB:
             "SELECT DISTINCT file FROM symbols ORDER BY file"
         ).fetchall()
         return [r["file"] for r in rows]
+
+    # ── Evolution ─────────────────────────────────────────────────────────────
+
+    def log_tool_call(self, tool: str, query: str, result_count: int):
+        from datetime import datetime, timezone
+        self.conn.execute(
+            "INSERT INTO tool_calls (tool, query, result_count, ts) VALUES (?, ?, ?, ?)",
+            (tool, query, result_count, datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def log_feedback(self, query: str, tool: str, was_helpful: bool,
+                     reason: str = "", tip: str = ""):
+        from datetime import datetime, timezone
+        self.conn.execute(
+            "INSERT INTO evolution_log (query, tool, was_helpful, reason, tip, ts) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (query, tool, int(was_helpful), reason, tip,
+             datetime.now(timezone.utc).isoformat()),
+        )
+        self.conn.commit()
+
+    def get_failure_tips(self, limit: int = 10) -> List[Dict]:
+        """Return recent non-empty tips from failed interactions."""
+        rows = self.conn.execute(
+            """SELECT tip, query, tool FROM evolution_log
+               WHERE was_helpful = 0 AND tip != ''
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_tool_stats(self) -> List[Dict]:
+        """Return per-tool call count and avg result_count."""
+        rows = self.conn.execute(
+            """SELECT tool,
+                      COUNT(*) as calls,
+                      ROUND(AVG(result_count), 1) as avg_results,
+                      SUM(CASE WHEN result_count = 0 THEN 1 ELSE 0 END) as zero_result_calls
+               FROM tool_calls
+               GROUP BY tool
+               ORDER BY calls DESC"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_evolution_summary(self) -> Dict[str, Any]:
+        """Return overall evolution stats."""
+        total = self.conn.execute("SELECT COUNT(*) FROM evolution_log").fetchone()[0]
+        helpful = self.conn.execute(
+            "SELECT COUNT(*) FROM evolution_log WHERE was_helpful = 1"
+        ).fetchone()[0]
+        tips_count = self.conn.execute(
+            "SELECT COUNT(*) FROM evolution_log WHERE tip != ''"
+        ).fetchone()[0]
+        return {
+            "total_feedback": total,
+            "helpful": helpful,
+            "not_helpful": total - helpful,
+            "tips_accumulated": tips_count,
+        }

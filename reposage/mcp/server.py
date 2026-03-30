@@ -267,6 +267,46 @@ async def start_mcp_server(repos: dict):
                     },
                 },
             ),
+            types.Tool(
+                name="record_feedback",
+                description=(
+                    "Report whether the last reposage tool call was helpful. "
+                    "Call this after using search/ask/symbol_context whenever you can judge "
+                    "if the result helped answer the user's question. "
+                    "If not helpful, provide a reason and a tip for future improvement — "
+                    "the tip will be shown to future agents facing similar queries."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "description": "Which tool's result you are rating (search/ask/symbol_context/...)",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "The query or question you used",
+                        },
+                        "was_helpful": {
+                            "type": "boolean",
+                            "description": "Did the result help answer the user's question?",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief explanation (especially if not helpful)",
+                        },
+                        "tip": {
+                            "type": "string",
+                            "description": (
+                                "If not helpful, a concrete tip for future similar queries "
+                                "(e.g. 'search notification constant names via grep fallback')"
+                            ),
+                        },
+                        **repo_param,
+                    },
+                    "required": ["tool", "query", "was_helpful"],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -340,6 +380,29 @@ async def start_mcp_server(repos: dict):
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
+def _log_call(db, tool: str, query: str, result: str):
+    """Record a tool call; estimate result count from bullet points in output."""
+    try:
+        count = result.count("•") or (1 if result and "No results" not in result else 0)
+        db.log_tool_call(tool, query, count)
+    except Exception:
+        pass  # never let logging break the main flow
+
+
+def _inject_tips(result: str, db) -> str:
+    """Append recent failure tips to tool output so future agents learn from them."""
+    try:
+        tips = db.get_failure_tips(limit=3)
+        if not tips:
+            return result
+        tip_lines = ["\n\n---\n**Learned tips from past interactions:**"]
+        for t in tips:
+            tip_lines.append(f"- {t['tip']}  *(from: {t['query'][:50]})*")
+        return result + "\n".join(tip_lines)
+    except Exception:
+        return result
+
+
 def _resolve_repo(args: dict, repos_registry: dict):
     """Return (db, vector_store, root) for the requested repo, or an error string."""
     repo_name = args.get("repo")
@@ -371,7 +434,13 @@ async def _dispatch(name: str, args: dict, repos_registry: dict) -> str:
     repo_root = entry["root"]
 
     if name == "search":
-        return _tool_search(args, db, vector_store, repo_root)
+        result = _tool_search(args, db, vector_store, repo_root)
+        _log_call(db, "search", args.get("query", ""), result)
+        return result
+    elif name == "ask":
+        result = _tool_ask(args, db, vector_store, repo_root)
+        _log_call(db, "ask", args.get("question", ""), result)
+        return result
     elif name == "symbol_context":
         return _tool_symbol_context(args, db)
     elif name == "find_callers":
@@ -382,8 +451,6 @@ async def _dispatch(name: str, args: dict, repos_registry: dict) -> str:
         return _tool_module_overview(args, db)
     elif name == "execution_flow":
         return _tool_execution_flow(args, db)
-    elif name == "ask":
-        return _tool_ask(args, db, vector_store, repo_root)
     elif name == "get_pending_summaries":
         return _tool_get_pending_summaries(args, db)
     elif name == "write_summaries":
@@ -392,6 +459,8 @@ async def _dispatch(name: str, args: dict, repos_registry: dict) -> str:
         return _tool_get_pending_wiki(args, db, repo_root)
     elif name == "write_wiki":
         return _tool_write_wiki(args, db, repo_root)
+    elif name == "record_feedback":
+        return _tool_record_feedback(args, db)
     return f"Unknown tool: {name}"
 
 
@@ -566,7 +635,7 @@ def _tool_search(args: dict, db, vector_store, repo_root: Path = None) -> str:
     lines.append(
         "\n---\nNext: use symbol_context(id='<id>') for a 360° view of any result."
     )
-    return "\n".join(lines)
+    return _inject_tips("\n".join(lines), db)
 
 
 def _tool_symbol_context(args: dict, db) -> str:
@@ -850,11 +919,12 @@ def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
     if wiki_context:
         context = f"## Architecture Overview\n{wiki_context}\n\n## Relevant Symbols\n{context}"
 
-    return (
+    raw = (
         f"## Question\n{question}\n\n"
         f"## Retrieved Context\n{context}\n\n"
         f"---\nAnswer the question above using the retrieved context."
     )
+    return _inject_tips(raw, db)
 
 
 def _tool_get_pending_summaries(args: dict, db) -> str:
@@ -1144,3 +1214,24 @@ def _tool_write_wiki(args: dict, db, repo_root: Path) -> str:
         "still_pending": still_pending,
         "next_action": next_action,
     })
+
+
+def _tool_record_feedback(args: dict, db) -> str:
+    tool = args.get("tool", "")
+    query = args.get("query", "")
+    was_helpful = bool(args.get("was_helpful", True))
+    reason = args.get("reason", "")
+    tip = args.get("tip", "")
+
+    db.log_feedback(query, tool, was_helpful, reason, tip)
+
+    summary = db.get_evolution_summary()
+    msg = "Feedback recorded."
+    if not was_helpful and tip:
+        msg += f" Tip saved: '{tip[:80]}'"
+    msg += (
+        f"\nEvolution stats: {summary['total_feedback']} total, "
+        f"{summary['helpful']} helpful, {summary['not_helpful']} not helpful, "
+        f"{summary['tips_accumulated']} tips accumulated."
+    )
+    return msg
