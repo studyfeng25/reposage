@@ -189,7 +189,7 @@ async def start_mcp_server(repos: dict):
                     "properties": {
                         "batch_size": {
                             "type": "integer",
-                            "default": 50,
+                            "default": 200,
                             "description": "Number of symbols to return per batch (max 200)",
                         },
                         "language": {
@@ -720,7 +720,7 @@ def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
 
 
 def _tool_get_pending_summaries(args: dict, db) -> str:
-    batch_size = min(int(args.get("batch_size", 50)), 200)
+    batch_size = min(int(args.get("batch_size", 200)), 200)
     language = args.get("language")
 
     # Count total pending
@@ -809,25 +809,28 @@ def _tool_write_summaries(args: dict, db, vector_store) -> str:
             written += 1
     db.conn.commit()
 
-    # Re-embed updated symbols so semantic search benefits immediately
-    if written > 0:
-        ids = [item["id"] for item in summaries if item.get("id") and item.get("summary")]
-        updated_syms = []
-        for sid in ids:
-            sym = db.get_symbol(sid)
-            if sym:
-                updated_syms.append(sym)
-        if updated_syms:
-            vector_store.upsert_symbols(updated_syms)
-
     remaining = db.conn.execute(
         "SELECT COUNT(*) FROM symbols WHERE summary IS NULL OR summary = ''"
     ).fetchone()[0]
 
+    # Only re-embed on the final batch to avoid per-batch embedding overhead.
+    # On the final batch, re-embed ALL symbols that have summaries (not just this batch).
+    if written > 0 and remaining == 0:
+        all_with_summary = db.conn.execute(
+            "SELECT id FROM symbols WHERE summary IS NOT NULL AND summary != ''"
+        ).fetchall()
+        all_syms = []
+        for row in all_with_summary:
+            sym = db.get_symbol(row["id"])
+            if sym:
+                all_syms.append(sym)
+        if all_syms:
+            vector_store.upsert_symbols(all_syms)
+
     next_action = (
         "Call get_pending_summaries again to process the next batch."
         if remaining > 0 else
-        "All symbols have summaries. Now call get_pending_wiki to start wiki generation."
+        "All symbols have summaries — vector embeddings updated. Now call get_pending_wiki to start wiki generation."
     )
 
     return json.dumps({"written": written, "remaining": remaining, "next_action": next_action})
@@ -912,17 +915,25 @@ def _tool_get_pending_wiki(args: dict, db, repo_root: Path) -> str:
     if not pending and not need_architecture:
         return json.dumps({"message": "All modules have wiki docs and ARCHITECTURE.md exists."})
 
+    # Return one module at a time to keep each Claude turn focused and fast
+    current = pending[0] if pending else None
+    remaining_after = len(pending) - 1
+
     return json.dumps({
         "pending_modules": len(pending),
-        "modules": pending,
-        "need_architecture": need_architecture,
+        "remaining_after_this": remaining_after,
+        "module": current,
+        "need_architecture": need_architecture and remaining_after == 0,
         "repo_name": repo_root.name,
         "module_prompt_template": module_prompt_template,
-        "arch_prompt_template": arch_prompt_template if need_architecture else None,
-        "instructions": (
-            "For each module, fill in the module_prompt_template and generate Markdown content. "
-            "If need_architecture is true, collect all module summaries and fill arch_prompt_template. "
-            "Then call write_wiki with the results."
+        "arch_prompt_template": arch_prompt_template if (need_architecture and remaining_after == 0) else None,
+        "next_action": (
+            "Generate wiki content for this module using module_prompt_template, "
+            "then call write_wiki with the result. "
+            + ("After write_wiki, call get_pending_wiki again immediately for the next module."
+               if remaining_after > 0 else
+               "This is the last module. Also generate ARCHITECTURE.md using arch_prompt_template if provided, "
+               "and include it in the write_wiki call.")
         ),
     }, ensure_ascii=False)
 
@@ -964,8 +975,24 @@ def _tool_write_wiki(args: dict, db, repo_root: Path) -> str:
         arch_path.write_text(architecture.strip(), encoding="utf-8")
         architecture_written = True
 
+    # Check if any modules still need wiki docs
+    from reposage.indexer.pipeline import get_reposage_dir as _get_dir
+    all_modules = db.get_all_modules()
+    docs_dir2 = _get_dir(repo_root) / "docs" / "modules"
+    still_pending = sum(
+        1 for m in all_modules
+        if not (docs_dir2 / f"{m['name']}.md").exists()
+    )
+
+    next_action = (
+        "Call get_pending_wiki again immediately to process the next module."
+        if still_pending > 0 else
+        "LLM generation phase complete. All summaries and wiki docs have been written."
+    )
+
     return json.dumps({
         "written_modules": written_modules,
         "architecture_written": architecture_written,
-        "next_action": "LLM generation phase complete. All summaries and wiki docs have been written.",
+        "still_pending": still_pending,
+        "next_action": next_action,
     })

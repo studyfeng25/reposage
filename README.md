@@ -77,6 +77,12 @@ uv pip install tree-sitter==0.21.3 tree-sitter-languages tree-sitter-swift \
 
 # 4. Install reposage
 pip install -e .
+
+# 5. Add to PATH (persists across shell restarts)
+echo '' >> ~/.zshrc  # use ~/.bashrc if you're on bash
+echo '# RepoSage CLI' >> ~/.zshrc
+echo "export PATH=\"$(pwd)/.venv/bin:\$PATH\"" >> ~/.zshrc
+export PATH="$(pwd)/.venv/bin:$PATH"   # take effect immediately
 ```
 
 ---
@@ -426,6 +432,12 @@ uv pip install tree-sitter==0.21.3 tree-sitter-languages tree-sitter-swift \
 
 # 4. 安装 reposage
 pip install -e .
+
+# 5. 配置 PATH（重启终端后依然生效）
+echo '' >> ~/.zshrc  # bash 用户改为 ~/.bashrc
+echo '# RepoSage CLI' >> ~/.zshrc
+echo "export PATH=\"$(pwd)/.venv/bin:\$PATH\"" >> ~/.zshrc
+export PATH="$(pwd)/.venv/bin:$PATH"   # 当前会话立即生效
 ```
 
 ---

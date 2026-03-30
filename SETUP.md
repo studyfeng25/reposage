@@ -88,6 +88,47 @@ uv pip install \
 
 ---
 
+### Step 1.5：配置 PATH（让 `reposage` 命令全局可用）
+
+将 venv 的 bin 目录加入 shell 配置，重启后依然生效：
+
+```bash
+# 检测当前 shell，写入对应配置文件
+SHELL_RC=""
+if [ -f "$HOME/.zshrc" ]; then
+  SHELL_RC="$HOME/.zshrc"
+elif [ -f "$HOME/.bashrc" ]; then
+  SHELL_RC="$HOME/.bashrc"
+elif [ -f "$HOME/.bash_profile" ]; then
+  SHELL_RC="$HOME/.bash_profile"
+fi
+
+if [ -n "$SHELL_RC" ]; then
+  echo '' >> "$SHELL_RC"
+  echo '# RepoSage CLI' >> "$SHELL_RC"
+  echo 'export PATH="<reposage>/.venv/bin:$PATH"' >> "$SHELL_RC"
+  echo "✅ 已写入 $SHELL_RC"
+else
+  echo "⚠️  未找到 shell 配置文件，请手动添加："
+  echo 'export PATH="<reposage>/.venv/bin:$PATH"'
+fi
+```
+
+立即在当前会话生效（无需重启终端）：
+
+```bash
+export PATH="<reposage>/.venv/bin:$PATH"
+```
+
+验证：
+
+```bash
+which reposage   # 应输出 <reposage>/.venv/bin/reposage
+reposage --version
+```
+
+---
+
 ### Step 2：注册 MCP Server 到 Claude Code（全局，只需一次）
 
 **推荐：指定目录，自动发现所有已索引仓库**
@@ -168,6 +209,8 @@ else:
 
 🔌 MCP 注册名称：reposage
 📂 仓库根目录：<projects>
+🐍 PATH 已配置：<reposage>/.venv/bin 已写入 shell 配置文件
+   重启终端或新开窗口后，reposage 命令全局可用
 
 ⚡ 下一步：
   1. 重启 Claude Code
