@@ -371,7 +371,7 @@ async def _dispatch(name: str, args: dict, repos_registry: dict) -> str:
     repo_root = entry["root"]
 
     if name == "search":
-        return _tool_search(args, db, vector_store)
+        return _tool_search(args, db, vector_store, repo_root)
     elif name == "symbol_context":
         return _tool_symbol_context(args, db)
     elif name == "find_callers":
@@ -409,7 +409,93 @@ def _tool_list_repos(repos_registry: dict) -> str:
     return "\n".join(lines)
 
 
-def _tool_search(args: dict, db, vector_store) -> str:
+def _grep_fallback(query: str, db, repo_root: Path, limit: int = 10) -> list:
+    """Grep source files for literal query string; map hits back to symbols."""
+    import subprocess
+    import shutil
+
+    grepper = shutil.which("rg") or shutil.which("grep")
+    if not grepper:
+        return []
+
+    if "rg" in grepper:
+        cmd = [grepper, "--json", "--max-count", "2",
+               "--max-filesize", "1M", "-e", query, str(repo_root)]
+    else:
+        cmd = [grepper, "-rn",
+               "--include=*.m", "--include=*.h", "--include=*.mm",
+               "--include=*.swift", "--include=*.java",
+               query, str(repo_root)]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    symbols: list = []
+    seen_ids: set = set()
+
+    if "rg" in grepper:
+        for line in result.stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") != "match":
+                continue
+            file_abs = obj["data"]["path"]["text"]
+            line_no = obj["data"]["line_number"]
+            try:
+                file_rel = str(Path(file_abs).relative_to(repo_root))
+            except ValueError:
+                continue
+            sym = _find_symbol_at_line(db, file_rel, line_no)
+            if sym and sym["id"] not in seen_ids:
+                seen_ids.add(sym["id"])
+                sym["_grep_match_line"] = line_no
+                symbols.append(sym)
+                if len(symbols) >= limit:
+                    break
+    else:
+        for line in result.stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) < 2:
+                continue
+            try:
+                file_rel = str(Path(parts[0]).relative_to(repo_root))
+                line_no = int(parts[1])
+            except (ValueError, TypeError):
+                continue
+            sym = _find_symbol_at_line(db, file_rel, line_no)
+            if sym and sym["id"] not in seen_ids:
+                seen_ids.add(sym["id"])
+                symbols.append(sym)
+                if len(symbols) >= limit:
+                    break
+
+    return symbols
+
+
+def _find_symbol_at_line(db, file_rel: str, line_no: int):
+    """Find smallest symbol covering line_no; fallback to nearest symbol above."""
+    row = db.conn.execute(
+        """SELECT * FROM symbols
+           WHERE file = ? AND start_line <= ? AND end_line >= ?
+           ORDER BY (end_line - start_line) ASC LIMIT 1""",
+        (file_rel, line_no, line_no),
+    ).fetchone()
+    if row:
+        return dict(row)
+    row = db.conn.execute(
+        """SELECT * FROM symbols
+           WHERE file = ? AND start_line <= ?
+           ORDER BY start_line DESC LIMIT 1""",
+        (file_rel, line_no),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _tool_search(args: dict, db, vector_store, repo_root: Path = None) -> str:
     query = args["query"]
     limit = args.get("limit", 15)
     language = args.get("language")
@@ -439,6 +525,19 @@ def _tool_search(args: dict, db, vector_store) -> str:
                 merged.append(sym)
 
     merged = merged[:limit]
+
+    # Grep fallback: if results are sparse, search source files literally
+    FALLBACK_THRESHOLD = 5
+    if len(merged) < FALLBACK_THRESHOLD and repo_root:
+        grep_syms = _grep_fallback(query, db, repo_root, limit=limit)
+        seen_ids = {r["id"] for r in merged}
+        for g in grep_syms:
+            if g["id"] not in seen_ids:
+                g["_from_grep"] = True
+                merged.append(g)
+                seen_ids.add(g["id"])
+        merged = merged[:limit]
+
     if not merged:
         return "No results found."
 
@@ -446,10 +545,23 @@ def _tool_search(args: dict, db, vector_store) -> str:
     for s in merged:
         sig = f" — {s['signature']}" if s.get("signature") else ""
         doc = f"\n    {s['doc_comment'][:80]}" if s.get("doc_comment") else ""
+        grep_tag = "  *(via grep)*" if s.get("_from_grep") else ""
         lines.append(
             f"• [{s['type']}] **{s['name']}**{sig}\n"
-            f"  {s['file']}:{s['start_line']}  (id: {s['id']}){doc}"
+            f"  {s['file']}:{s['start_line']}  (id: {s['id']}){grep_tag}{doc}"
         )
+
+    # Notification listener routing: find methods that listen to the query as a notification name
+    notification_listeners = db.get_listeners_for_notification(query)
+    if notification_listeners:
+        lines.append(f"\n### Notification Listeners for '{query}'")
+        for nl in notification_listeners[:5]:
+            sig = f" — {nl['signature']}" if nl.get("signature") else ""
+            parent = f"  ({nl['parent_name']})" if nl.get("parent_name") else ""
+            lines.append(
+                f"• [method] **{nl['name']}**{sig}\n"
+                f"  {nl['method_file']}:{nl['start_line']}{parent}"
+            )
 
     lines.append(
         "\n---\nNext: use symbol_context(id='<id>') for a 360° view of any result."
@@ -702,6 +814,32 @@ def _tool_ask(args: dict, db, vector_store, repo_root: Path) -> str:
                 + (f"\n  Doc: {doc[:150]}" if doc else "")
             )
 
+    # Grep fallback: if FTS + semantic results are sparse, search source files literally
+    if len(seen) < 5:
+        grep_syms = _grep_fallback(question, db, repo_root, limit=8)
+        for g in grep_syms:
+            if g["id"] not in seen:
+                seen.add(g["id"])
+                full = db.get_symbol(g["id"]) or g
+                match_line = g.get("_grep_match_line", full.get("start_line", "?"))
+                summary = full.get("summary") or ""
+                context_parts.append(
+                    f"[{full.get('type','?')}] {full.get('name','?')} "
+                    f"in {full.get('file','?')}:{match_line}  (found via grep)"
+                    + (f"\n  Summary: {summary[:200]}" if summary else "")
+                )
+
+    # Notification listener routing: find methods that listen to the question as a notification name
+    notification_listeners = db.get_listeners_for_notification(question)
+    for nl in notification_listeners[:5]:
+        if nl["source_id"] not in seen:
+            seen.add(nl["source_id"])
+            context_parts.append(
+                f"[method listening to '{question}'] {nl['name']} "
+                f"in {nl['method_file']}:{nl['start_line']}"
+                + (f"\n  Summary: {nl['summary'][:150]}" if nl.get("summary") else "")
+            )
+
     from reposage.indexer.pipeline import get_reposage_dir
     arch_md = get_reposage_dir(repo_root) / "docs" / "ARCHITECTURE.md"
     wiki_context = ""
@@ -765,6 +903,13 @@ def _tool_get_pending_summaries(args: dict, db) -> str:
         ).fetchall()
         callee_names = [c["target_name"] for c in callee_rows]
 
+        # Get notification names this symbol listens to (from LISTENS_TO relations)
+        notif_rows = db.conn.execute(
+            "SELECT target_name FROM relations WHERE source_id = ? AND rel_type = 'LISTENS_TO'",
+            (r["id"],),
+        ).fetchall()
+        listens_to = [n["target_name"] for n in notif_rows]
+
         batch.append({
             "id": r["id"],
             "name": r["name"],
@@ -776,10 +921,13 @@ def _tool_get_pending_summaries(args: dict, db) -> str:
             "file": r["file"],
             "line": r["start_line"],
             "callee_names": callee_names,
+            "listens_to_notifications": listens_to,
         })
 
     next_action = (
         "REQUIRED: You MUST call write_summaries now with a summary for every symbol in this batch. "
+        "If 'listens_to_notifications' is non-empty for a symbol, mention those notification names "
+        "in its summary (e.g. 'handles UIKeyboardWillHideNotification to adjust layout'). "
         "After write_summaries succeeds, if the returned 'remaining' > 0 you MUST immediately call "
         "get_pending_summaries again to fetch the next batch — keep looping until remaining == 0. "
         "Do NOT stop, do NOT ask the user for confirmation between batches."

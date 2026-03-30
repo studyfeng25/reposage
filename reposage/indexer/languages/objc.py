@@ -274,31 +274,61 @@ def extract_symbols(tree, file_rel: str, source: bytes, language) -> Tuple[List[
     def _extract_calls(node, source_id: str, file_rel: str, source: bytes, relations: List[Relation]):
         """Recursively extract message sends from a method body."""
         if node.type == "message_expression":
-            # Get the first keyword (selector)
+            # Collect all keyword_argument nodes to build full selector
+            kw_args = []
+            simple_id = None
             for child in node.children:
                 if child.type == "keyword_argument":
                     kw = child.child_by_field_name("keyword")
+                    val = child.child_by_field_name("value")
                     if kw:
-                        selector = node_text(kw) + ":"
-                        relations.append(Relation(
-                            source_id=source_id,
-                            target_name=selector,
-                            rel_type="CALLS",
-                            file=file_rel,
-                            line=node.start_point[0] + 1,
-                            confidence=0.8,
-                        ))
-                        break
-                elif child.type == "identifier" and child != node.children[0]:
-                    relations.append(Relation(
-                        source_id=source_id,
-                        target_name=node_text(child),
-                        rel_type="CALLS",
-                        file=file_rel,
-                        line=node.start_point[0] + 1,
-                        confidence=0.7,
-                    ))
-                    break
+                        kw_args.append((node_text(kw), val))
+                elif child.type == "identifier" and child != node.children[0] and not kw_args:
+                    simple_id = node_text(child)
+
+            if kw_args:
+                full_selector = "".join(k + ":" for k, _ in kw_args)
+
+                # Detect addObserver:selector:name:object: pattern → LISTENS_TO relation
+                if full_selector.startswith("addObserver:selector:name:"):
+                    name_val = next((v for k, v in kw_args if k == "name"), None)
+                    if name_val is not None:
+                        raw = node_text(name_val).strip()
+                        notification_name = None
+                        if raw.startswith('@"') and raw.endswith('"'):
+                            notification_name = raw[2:-1]
+                        elif raw not in ("nil", "NULL"):
+                            notification_name = raw  # constant name (e.g. UIKeyboardWillHideNotification)
+                        if notification_name:
+                            relations.append(Relation(
+                                source_id=source_id,
+                                target_name=notification_name,
+                                rel_type="LISTENS_TO",
+                                file=file_rel,
+                                line=node.start_point[0] + 1,
+                                confidence=0.95,
+                            ))
+
+                # Record first keyword as CALLS relation (original behaviour)
+                relations.append(Relation(
+                    source_id=source_id,
+                    target_name=kw_args[0][0] + ":",
+                    rel_type="CALLS",
+                    file=file_rel,
+                    line=node.start_point[0] + 1,
+                    confidence=0.8,
+                ))
+            elif simple_id:
+                # Simple unary selector: [obj doSomething]
+                relations.append(Relation(
+                    source_id=source_id,
+                    target_name=simple_id,
+                    rel_type="CALLS",
+                    file=file_rel,
+                    line=node.start_point[0] + 1,
+                    confidence=0.7,
+                ))
+
         for child in node.children:
             _extract_calls(child, source_id, file_rel, source, relations)
 

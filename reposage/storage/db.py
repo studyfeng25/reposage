@@ -266,6 +266,29 @@ class RepoSageDB:
                     queue.append((row["target_id"], d + 1))
         return result
 
+    def get_listeners_for_notification(self, notification_name: str) -> List[Dict]:
+        """Find methods that registered to listen to a notification via LISTENS_TO relations."""
+        rows = self.conn.execute(
+            """SELECT r.source_id, r.line, r.file,
+                      s.name, s.type, s.file as method_file,
+                      s.start_line, s.parent_name, s.signature, s.summary
+               FROM relations r
+               JOIN symbols s ON r.source_id = s.id
+               WHERE r.rel_type = 'LISTENS_TO'
+                 AND (r.target_name = ? OR r.target_name LIKE ?)
+               ORDER BY r.confidence DESC""",
+            (notification_name, f"%{notification_name}%"),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_notifications_for_symbol(self, symbol_id: str) -> List[str]:
+        """Return notification names that this symbol listens to."""
+        rows = self.conn.execute(
+            "SELECT target_name FROM relations WHERE source_id = ? AND rel_type = 'LISTENS_TO'",
+            (symbol_id,),
+        ).fetchall()
+        return [r["target_name"] for r in rows]
+
     def get_relations_for_symbol(self, symbol_id: str) -> Dict[str, List[Dict]]:
         rows = self.conn.execute(
             "SELECT * FROM relations WHERE source_id = ? OR target_id = ?",
